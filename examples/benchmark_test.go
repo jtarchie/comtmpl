@@ -1,11 +1,11 @@
-package templates_test
+package examples_test
 
 import (
 	"bytes"
 	"html/template"
 	"testing"
 
-	templates "github.com/jtarchie/comtmpl/examples"
+	examples "github.com/jtarchie/comtmpl/examples"
 )
 
 func BenchmarkStandardTemplate(b *testing.B) {
@@ -48,7 +48,7 @@ func BenchmarkCustomTemplate(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		buf.Reset()
-		err := templates.Parsed.ExecuteTemplate(&buf, "index.html", data)
+		err := examples.Parsed.ExecuteTemplate(&buf, "index.html", data)
 		if err != nil {
 			b.Fatalf("failed to execute template: %v", err)
 		}
