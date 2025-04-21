@@ -1,0 +1,10 @@
+version: 3
+
+tasks:
+  default:
+    cmds:
+    - gofmt -w .
+    - golangci-lint run ./... --fix
+    - go run *.go examples/index.html > examples/templates.go
+    - gofmt -w examples/templates.go
+    - go test ./... -bench . -benchmem
