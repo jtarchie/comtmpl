@@ -59,7 +59,7 @@ func (c *CLI) Run() error {
 		varCounter := 0
 
 		for _, node := range template.Tree.Root.Nodes {
-			writeString(writer, fmt.Sprintf("//%s:%d\n", template.Name(), offset.LineNumberAt(int64(node.Position()))))
+			writeString(writer, fmt.Sprintf("\n\n//%s:%d\n\n", template.Name(), offset.LineNumberAt(int64(node.Position()))))
 			switch typed := node.(type) {
 			case *parse.TextNode:
 				writeString(writer, "_, err = ")
