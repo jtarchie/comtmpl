@@ -75,7 +75,15 @@ func (c *CLI) Run() error {
 						// Handle field access like {{.Name}} or {{.User.Name}}
 						if fieldNode, ok := cmd.Args[0].(*parse.FieldNode); ok {
 							// Generate the field access path (e.g., ".Name" or ".User.Name")
-							fieldPath := fieldPathToString(fieldNode.Ident)
+							fieldPath := strings.Join(fieldNode.Ident, ".")
+							fieldPathAsSlice := "[]string{"
+							for i, ident := range fieldNode.Ident {
+								if i > 0 {
+									fieldPathAsSlice += ", "
+								}
+								fieldPathAsSlice += fmt.Sprintf("%q", ident)
+							}
+							fieldPathAsSlice += "}"
 
 							// Use a unique variable name for each field access
 							valueVar := fmt.Sprintf("value%d", varCounter)
@@ -85,7 +93,7 @@ func (c *CLI) Run() error {
 							writeString(writer, `
 // Handle {{`+fieldPath+`}}
 var `+valueVar+` any
-`+valueVar+`, err = templates.EvalField(data, "`+fieldPath+`")
+`+valueVar+`, err = templates.EvalField(data, `+fieldPathAsSlice+`)
 if err != nil {
 	return err
 }
@@ -111,11 +119,6 @@ if err != nil {
 	`)
 
 	return nil
-}
-
-// Helper function to convert field path to string
-func fieldPathToString(ident []string) string {
-	return strings.Join(ident, ".")
 }
 
 func main() {

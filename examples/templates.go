@@ -20,7 +20,7 @@ var Parsed = templates.Templates{
 
 		// Handle {{Title}}
 		var value0 any
-		value0, err = templates.EvalField(data, "Title")
+		value0, err = templates.EvalField(data, []string{"Title"})
 		if err != nil {
 			return err
 		}
@@ -40,7 +40,7 @@ var Parsed = templates.Templates{
 
 		// Handle {{Title}}
 		var value1 any
-		value1, err = templates.EvalField(data, "Title")
+		value1, err = templates.EvalField(data, []string{"Title"})
 		if err != nil {
 			return err
 		}
@@ -58,7 +58,7 @@ var Parsed = templates.Templates{
 
 		// Handle {{User.Name}}
 		var value2 any
-		value2, err = templates.EvalField(data, "User.Name")
+		value2, err = templates.EvalField(data, []string{"User", "Name"})
 		if err != nil {
 			return err
 		}

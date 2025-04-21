@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"reflect"
-	"strings"
 )
 
 type Template func(io.Writer, any) error
@@ -18,14 +17,10 @@ func (t Templates) ExecuteTemplate(writer io.Writer, name string, data any) erro
 }
 
 // Helper function to evaluate field access like .Name or .User.Name
-func EvalField(data any, fieldPath string) (any, error) {
+func EvalField(data any, parts []string) (any, error) {
 	if data == nil {
 		return "", nil
 	}
-
-	// Trim the leading dot
-	fieldPath = strings.TrimPrefix(fieldPath, ".")
-	parts := strings.Split(fieldPath, ".")
 
 	var current = data
 
