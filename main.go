@@ -115,7 +115,7 @@ if err != nil {
 
 // Helper function to convert field path to string
 func fieldPathToString(ident []string) string {
-	return "." + strings.Join(ident, ".")
+	return strings.Join(ident, ".")
 }
 
 func main() {

@@ -18,9 +18,9 @@ var Parsed = templates.Templates{
 		}
 		//index.html:3
 
-		// Handle {{.Title}}
+		// Handle {{Title}}
 		var value0 any
-		value0, err = templates.EvalField(data, ".Title")
+		value0, err = templates.EvalField(data, "Title")
 		if err != nil {
 			return err
 		}
@@ -38,9 +38,9 @@ var Parsed = templates.Templates{
 		}
 		//index.html:6
 
-		// Handle {{.Title}}
+		// Handle {{Title}}
 		var value1 any
-		value1, err = templates.EvalField(data, ".Title")
+		value1, err = templates.EvalField(data, "Title")
 		if err != nil {
 			return err
 		}
@@ -56,9 +56,9 @@ var Parsed = templates.Templates{
 		}
 		//index.html:7
 
-		// Handle {{.User.Name}}
+		// Handle {{User.Name}}
 		var value2 any
-		value2, err = templates.EvalField(data, ".User.Name")
+		value2, err = templates.EvalField(data, "User.Name")
 		if err != nil {
 			return err
 		}
