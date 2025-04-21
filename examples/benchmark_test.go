@@ -15,7 +15,12 @@ func BenchmarkStandardTemplate(b *testing.B) {
 	}
 
 	var buf bytes.Buffer
-	data := map[string]interface{}{}
+	data := map[string]interface{}{
+		"Title": "Hello, World!",
+		"User": map[string]interface{}{
+			"Name": "John Doe",
+		},
+	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -31,7 +36,12 @@ func BenchmarkStandardTemplate(b *testing.B) {
 
 func BenchmarkCustomTemplate(b *testing.B) {
 	var buf bytes.Buffer
-	data := map[string]interface{}{}
+	data := map[string]interface{}{
+		"Title": "Hello, World!",
+		"User": map[string]interface{}{
+			"Name": "John Doe",
+		},
+	}
 
 	b.ResetTimer()
 	b.ReportAllocs()
