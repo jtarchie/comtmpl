@@ -125,61 +125,80 @@ if err != nil {
 			return "", nil
 		}
 
+		// Trim the leading dot
 		fieldPath = strings.TrimPrefix(fieldPath, ".")
+		parts := strings.Split(fieldPath, ".")
 
-		// Handle map[string]interface{} case
-		if m, ok := data.(map[string]interface{}); ok {
-			parts := strings.Split(fieldPath, ".")
-			current := m
-			
-			// Handle nested fields except the last one
-			for i := 0; i < len(parts)-1; i++ {
-				if nextMap, ok := current[parts[i]].(map[string]interface{}); ok {
-					current = nextMap
-				} else if nextMap, ok := current[parts[i]]; ok {
-					// Try to continue with whatever we got
-					if m, ok := nextMap.(map[string]interface{}); ok {
-						current = m
-					} else {
-						return "", fmt.Errorf("cannot access %s in %s", parts[i+1], parts[i])
-					}
-				} else {
+		var current any = data
+
+		// Traverse the parts
+		for _, part := range parts {
+			// Handle nil values
+			if current == nil {
+				return "", nil
+			}
+
+			// Fast path for common map types without using reflection
+			switch m := current.(type) {
+			case map[string]interface{}:
+				val, ok := m[part]
+				if !ok {
 					return "", nil
 				}
+				current = val
+				continue
+				
+			case map[string]string:
+				val, ok := m[part]
+				if !ok {
+					return "", nil
+				}
+				current = val
+				continue
 			}
-			
-			// Access the final field
-			if val, ok := current[parts[len(parts)-1]]; ok {
-				return val, nil
-			}
-			return "", nil
-		}
 
-		// Handle struct case with reflection
-		v := reflect.ValueOf(data)
-		parts := strings.Split(fieldPath, ".")
-		
-		for _, part := range parts {
-			// Dereference pointer if needed
-			for v.Kind() == reflect.Pointer {
+			// Use reflection only when necessary
+			v := reflect.ValueOf(current)
+			
+			// Dereference pointers and interfaces
+			for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
 				if v.IsNil() {
 					return "", nil
 				}
 				v = v.Elem()
 			}
-			
-			// Handle structs
-			if v.Kind() == reflect.Struct {
+
+			switch v.Kind() {
+			case reflect.Map:
+				if v.Type().Key().Kind() != reflect.String {
+					return "", fmt.Errorf("map key must be string")
+				}
+				keyValue := reflect.ValueOf(part)
+				v = v.MapIndex(keyValue)
+				if !v.IsValid() {
+					return "", nil
+				}
+				if !v.CanInterface() {
+					return "", fmt.Errorf("cannot access map value")
+				}
+				current = v.Interface()
+				
+			case reflect.Struct:
 				v = v.FieldByName(part)
 				if !v.IsValid() {
 					return "", nil
 				}
-			} else {
-				return "", fmt.Errorf("cannot access %s in non-struct value", part)
+				if !v.CanInterface() {
+					return "", fmt.Errorf("cannot access unexported field %s", part)
+				}
+				current = v.Interface()
+				
+			default:
+				return "", fmt.Errorf("cannot access %s in %v type", part, v.Kind())
 			}
 		}
-		
-		return v.Interface(), nil
+
+		return current, nil
 	}
 	`)
 
