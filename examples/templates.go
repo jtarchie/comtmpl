@@ -80,7 +80,8 @@ var Parsed = templates.Templates{
 
 		_, err = io.WriteString(writer, `!</p>
   </body>
-</html>`)
+</html>
+`)
 		if err != nil {
 			return err
 		}

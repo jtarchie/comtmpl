@@ -2,6 +2,7 @@ package examples_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	templates "github.com/jtarchie/comtmpl/examples"
@@ -57,7 +58,7 @@ func TestDotNotation(t *testing.T) {
 				t.Fatalf("failed to execute template: %v", err)
 			}
 
-			if buf.String() != tc.expected {
+			if strings.TrimSpace(buf.String()) != tc.expected {
 				t.Errorf("template output does not match expected:\nGot:\n%s\n\nExpected:\n%s",
 					buf.String(), tc.expected)
 			}
