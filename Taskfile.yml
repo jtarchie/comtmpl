@@ -3,8 +3,8 @@ version: 3
 tasks:
   default:
     cmds:
-    - go run *.go --package-name examples examples/index.html > examples/templates.go
-    - gofmt -w .
-    - golangci-lint run ./... --fix
-    - go test ./...
-    - go test ./... -bench . -benchmem
+      - go run *.go --package-name examples examples/index.html > examples/templates.go
+      - gofmt -w .
+      - golangci-lint run ./... --fix
+      - go test ./...
+      - go test ./... -bench . -benchmem
