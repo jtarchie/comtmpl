@@ -7,10 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"text/template/parse"
 
 	"github.com/alecthomas/kong"
+	"github.com/go-task/slim-sprig/v3"
 )
 
 type CLI struct {
@@ -26,7 +26,7 @@ func writeString(writer io.Writer, str string) {
 }
 
 func (c *CLI) Run() error {
-	templates, err := template.ParseFiles(c.Filenames...)
+	tmpl, err := template.New("").Funcs(sprig.FuncMap()).ParseFiles(c.Filenames...)
 	if err != nil {
 		return fmt.Errorf("failed to parse templates: %w", err)
 	}
@@ -42,18 +42,18 @@ func (c *CLI) Run() error {
 		"github.com/jtarchie/comtmpl/templates"
 	)
 
-	var Parsed = templates.Templates{
+	var Parsed = templates.NewTemplates(map[string]templates.Template{
 	`, c.PackageName))
 
 	for _, filename := range c.Filenames {
 		baseFilename := filepath.Base(filename)
-		template := templates.Lookup(baseFilename)
+		template := tmpl.Lookup(baseFilename)
 		offset, err := NewLineIndex(filename)
 		if err != nil {
 			return fmt.Errorf("failed to create line index: %w", err)
 		}
 
-		writeString(writer, fmt.Sprintf("\t%q: func(writer io.Writer, data any) error {\nvar err error\n", template.Name()))
+		writeString(writer, fmt.Sprintf("\t%q: func(t *templates.Templates, writer io.Writer, data any) error {\nvar err error\n", template.Name()))
 
 		// Counter for unique variable names
 		varCounter := 0
@@ -69,42 +69,99 @@ func (c *CLI) Run() error {
 				writeString(writer, "if err != nil {\nreturn err\n}\n")
 			case *parse.ActionNode:
 				pipe := typed.Pipe
-				if len(pipe.Cmds) == 1 {
-					cmd := pipe.Cmds[0]
-					if len(cmd.Args) == 1 {
-						// Handle field access like {{.Name}} or {{.User.Name}}
-						if fieldNode, ok := cmd.Args[0].(*parse.FieldNode); ok {
-							// Generate the field access path (e.g., ".Name" or ".User.Name")
-							fieldPath := strings.Join(fieldNode.Ident, ".")
-							fieldPathAsSlice := "[]string{"
-							for i, ident := range fieldNode.Ident {
-								if i > 0 {
-									fieldPathAsSlice += ", "
+
+				// Get a string representation of the pipe for comments
+				pipeStr := typed.String()
+
+				// Variable to store value from previous pipe command
+				pipeValueVar := fmt.Sprintf("pipeValue%d", varCounter)
+				varCounter++
+
+				writeString(writer, fmt.Sprintf("// Handle %s\n", pipeStr))
+				writeString(writer, fmt.Sprintf("var %s any\n", pipeValueVar))
+
+				// Process each command in the pipe
+				for i, cmd := range pipe.Cmds {
+					if i == 0 {
+						// First command - could be a field access or identifier
+						if len(cmd.Args) == 1 {
+							// Field access like {{.Name}} or {{.User.Name}}
+							if fieldNode, ok := cmd.Args[0].(*parse.FieldNode); ok {
+								// Generate the field access path
+								fieldPathAsSlice := "[]string{"
+								for j, ident := range fieldNode.Ident {
+									if j > 0 {
+										fieldPathAsSlice += ", "
+									}
+									fieldPathAsSlice += fmt.Sprintf("%q", ident)
 								}
-								fieldPathAsSlice += fmt.Sprintf("%q", ident)
+								fieldPathAsSlice += "}"
+
+								writeString(writer, fmt.Sprintf(`%s, err = templates.EvalField(data, %s)
+if err != nil {
+	return err
+}
+`, pipeValueVar, fieldPathAsSlice))
+							} else if _, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
+								// This is just a function with no args like {{len}}
+								// It will be handled in the next pipe section if it exists
+								writeString(writer, fmt.Sprintf(`%s = nil
+`, pipeValueVar))
 							}
-							fieldPathAsSlice += "}"
+						} else {
+							// Handle more complex first command
+							writeString(writer, fmt.Sprintf(`// TODO: Handle more complex first command
+%s = nil
+`, pipeValueVar))
+						}
+					} else {
+						// Subsequent commands - function calls that take the previous value
+						if len(cmd.Args) > 0 {
+							// First argument should be function name
+							if identNode, ok := cmd.Args[0].(*parse.IdentifierNode); ok {
+								funcName := identNode.Ident
 
-							// Use a unique variable name for each field access
-							valueVar := fmt.Sprintf("value%d", varCounter)
-							varCounter++
+								// Check if there are additional arguments for the function
+								var additionalArgs string
+								if len(cmd.Args) > 1 {
+									// Process additional arguments
+									for argIdx := 1; argIdx < len(cmd.Args); argIdx++ {
+										arg := cmd.Args[argIdx]
 
-							// Write the field accessor code
-							writeString(writer, `
-// Handle {{`+fieldPath+`}}
-var `+valueVar+` any
-`+valueVar+`, err = templates.EvalField(data, `+fieldPathAsSlice+`)
+										// Handle different argument types
+										if literalNode, ok := arg.(*parse.NumberNode); ok {
+											// Number argument like truncate 10
+											additionalArgs += fmt.Sprintf(", %s", literalNode.Text)
+										} else if stringNode, ok := arg.(*parse.StringNode); ok {
+											// String argument
+											additionalArgs += fmt.Sprintf(", %q", stringNode.Text)
+										} else if boolNode, ok := arg.(*parse.BoolNode); ok {
+											// Boolean argument
+											additionalArgs += fmt.Sprintf(", %t", boolNode.True)
+										} else {
+											// Other argument types - add placeholder
+											additionalArgs += ", nil /*unsupported arg type*/"
+										}
+									}
+								}
+
+								writeString(writer, fmt.Sprintf(`// Pipe to function %s
+%s, err = t.CallFunc(%q, %s%s)
 if err != nil {
 	return err
 }
-_, err = fmt.Fprint(writer, `+valueVar+`)
-if err != nil {
-	return err
-}
-`)
+`, funcName, pipeValueVar, funcName, pipeValueVar, additionalArgs))
+							}
 						}
 					}
 				}
+
+				// Final output of pipe result
+				writeString(writer, fmt.Sprintf(`_, err = fmt.Fprint(writer, %s)
+if err != nil {
+	return err
+}
+`, pipeValueVar))
 			}
 		}
 
@@ -115,7 +172,7 @@ if err != nil {
 	}
 
 	writeString(writer, `
-	}
+})
 	`)
 
 	return nil
