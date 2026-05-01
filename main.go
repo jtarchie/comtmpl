@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"go/types"
 	"html/template"
 	"io"
 	"log/slog"
@@ -19,6 +21,13 @@ type CLI struct {
 	PackageName string   `help:"Package name" default:"templates"`
 }
 
+// GenOptions controls a codegen run. It is the in-process equivalent of CLI flags.
+type GenOptions struct {
+	Filenames   []string
+	PackageName string
+	Output      io.Writer
+}
+
 func writeString(writer io.Writer, str string) {
 	_, err := writer.Write([]byte(str))
 	if err != nil {
@@ -27,52 +36,170 @@ func writeString(writer io.Writer, str string) {
 }
 
 func (c *CLI) Run() error {
-	tmpl, err := template.New("").Funcs(sprig.FuncMap()).ParseFiles(c.Filenames...)
+	return Generate(GenOptions{
+		Filenames:   c.Filenames,
+		PackageName: c.PackageName,
+		Output:      os.Stdout,
+	})
+}
+
+// resolvedTemplate holds the per-template state derived from CLI input
+// and template directives. It is populated in the first pass of
+// Generate and consumed in the second.
+type resolvedTemplate struct {
+	Filename     string
+	BaseName     string
+	TemplatePath string // absolute path; used for //line directives
+	Tree         *parse.Tree
+	LineIndex    *LineIndex
+	Directives   Directives
+	DataType     types.Type // nil for dynamic templates
+	DataTypeExpr string     // Go expression to refer to DataType
+}
+
+// Generate runs codegen for the given templates and writes the result to opts.Output.
+func Generate(opts GenOptions) error {
+	tmpl, err := template.New("").Funcs(sprig.FuncMap()).ParseFiles(opts.Filenames...)
 	if err != nil {
 		return fmt.Errorf("failed to parse templates: %w", err)
 	}
 
-	writer := os.Stdout
+	imports := NewImportSet()
+	imports.Add("io", "")
+	imports.Add("fmt", "")
+	imports.Add("github.com/jtarchie/comtmpl/templates", "templates")
 
-	writeString(writer, fmt.Sprintf(`package %s
+	resolver := NewTypeResolver()
 
-import (
-	"io"
-	"fmt"
-	"github.com/jtarchie/comtmpl/templates"
-)
-
-var Parsed = templates.NewTemplates(map[string]templates.Template{
-`, c.PackageName))
-
-	for _, filename := range c.Filenames {
-		baseFilename := filepath.Base(filename)
-		template := tmpl.Lookup(baseFilename)
-		offset, err := NewLineIndex(filename)
+	resolved := make([]*resolvedTemplate, 0, len(opts.Filenames))
+	for _, filename := range opts.Filenames {
+		raw, err := os.ReadFile(filename)
 		if err != nil {
-			return fmt.Errorf("failed to create line index: %w", err)
+			return fmt.Errorf("read %s: %w", filename, err)
+		}
+		dirs, err := ParseDirectives(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", filename, err)
 		}
 
-		writeString(writer, fmt.Sprintf("\t%q: func(t *templates.Templates, writer io.Writer, data any) error {\n\t\tvar err error\n", template.Name()))
+		baseFilename := filepath.Base(filename)
+		t := tmpl.Lookup(baseFilename)
+		if t == nil {
+			return fmt.Errorf("template %q not found after parse", baseFilename)
+		}
+		idx, err := NewLineIndex(filename)
+		if err != nil {
+			return fmt.Errorf("line index for %s: %w", filename, err)
+		}
+		absPath, err := filepath.Abs(filename)
+		if err != nil {
+			absPath = filename
+		}
 
-		// Counter for unique variable names
+		rt := &resolvedTemplate{
+			Filename:     filename,
+			BaseName:     t.Name(),
+			TemplatePath: absPath,
+			Tree:         t.Tree,
+			LineIndex:    idx,
+			Directives:   dirs,
+		}
+
+		if dirs.Typed() {
+			pathOrAlias, typeName, err := SplitDataTypeRef(dirs.DataTypeRef)
+			if err != nil {
+				return fmt.Errorf("%s: %w", filename, err)
+			}
+			importPath := pathOrAlias
+			if alias, ok := dirs.Imports[pathOrAlias]; ok {
+				importPath = alias
+			}
+			typ, err := resolver.ResolveType(importPath, typeName)
+			if err != nil {
+				return fmt.Errorf("%s: @data %q: %w", filename, dirs.DataTypeRef, err)
+			}
+			rt.DataType = typ
+
+			// Decide how to refer to the type. Same-package refs use the
+			// bare name; cross-package refs add an alias to the import set.
+			pkgName := lastPathSegment(importPath)
+			if pkgName == opts.PackageName {
+				rt.DataTypeExpr = typeName
+			} else {
+				alias := imports.Add(importPath, pkgName)
+				rt.DataTypeExpr = alias + "." + typeName
+			}
+		}
+
+		resolved = append(resolved, rt)
+	}
+
+	writer := opts.Output
+
+	// Emit typed render functions to a side buffer; they are appended
+	// after the registry so the file stays readable.
+	typedBody := &bytes.Buffer{}
+	for _, rt := range resolved {
+		if rt.DataType == nil {
+			continue
+		}
+		if err := emitTypedTemplate(typedBody, opts, rt.TemplatePath, rt.BaseName,
+			rt.Tree, rt.LineIndex, rt.DataType, rt.DataTypeExpr); err != nil {
+			return err
+		}
+	}
+
+	writeString(writer, fmt.Sprintf("package %s\n\n", opts.PackageName))
+	imports.WriteImports(writer)
+	writeString(writer, "\nvar Parsed = templates.NewTemplates(map[string]templates.Template{\n")
+
+	for _, rt := range resolved {
+		if rt.DataType != nil {
+			// Typed template: emit a registry shim that delegates to the
+			// typed render function.
+			fnName := renderFuncName(rt.BaseName)
+			writeString(writer, fmt.Sprintf("\t%q: func(t *templates.Templates, writer io.Writer, data any) error {\n", rt.BaseName))
+			writeString(writer, fmt.Sprintf("\t\ttyped, ok := data.(%s)\n", rt.DataTypeExpr))
+			writeString(writer, "\t\tif !ok {\n")
+			writeString(writer, fmt.Sprintf("\t\t\treturn fmt.Errorf(\"%s: expected %s, got %%T\", data)\n", rt.BaseName, rt.DataTypeExpr))
+			writeString(writer, "\t\t}\n")
+			writeString(writer, fmt.Sprintf("\t\treturn %s(writer, typed)\n", fnName))
+			writeString(writer, "\t},\n")
+			continue
+		}
+
+		// Dynamic template: existing reflection-based emit.
+		writeString(writer, fmt.Sprintf("\t%q: func(t *templates.Templates, writer io.Writer, data any) error {\n\t\tvar err error\n", rt.BaseName))
 		varCounter := 0
-
-		processTreeNodes(writer, template.Tree.Root.Nodes, template.Name(), offset, &varCounter)
-
+		processTreeNodes(writer, rt.Tree.Root.Nodes, rt.TemplatePath, rt.LineIndex, &varCounter)
 		writeString(writer, "\n\t\treturn nil\n\t},\n")
 	}
 
 	writeString(writer, "})\n")
+
+	if typedBody.Len() > 0 {
+		writeString(writer, typedBody.String())
+	}
+
 	return nil
 }
 
+// emitLineDirective writes a Go //line directive pointing at the given
+// template position. The directive must start at column 0 (no leading
+// whitespace) for the Go compiler to honor it. Subsequent lines of the
+// generated file are reported as originating from templatePath until the
+// next //line directive.
+func emitLineDirective(writer io.Writer, templatePath string, offset *LineIndex, pos int64) {
+	if offset == nil || templatePath == "" {
+		return
+	}
+	writeString(writer, fmt.Sprintf("\n//line %s:%d\n", templatePath, offset.LineNumberAt(pos)))
+}
+
 // processTreeNodes processes all nodes at the current level
-func processTreeNodes(writer io.Writer, nodes []parse.Node, templateName string, offset *LineIndex, varCounter *int) {
+func processTreeNodes(writer io.Writer, nodes []parse.Node, templatePath string, offset *LineIndex, varCounter *int) {
 	for _, node := range nodes {
-		if offset != nil && templateName != "" {
-			writeString(writer, fmt.Sprintf("\n\t\t//%s:%d\n", templateName, offset.LineNumberAt(int64(node.Position()))))
-		}
+		emitLineDirective(writer, templatePath, offset, int64(node.Position()))
 
 		switch n := node.(type) {
 		case *parse.TextNode:
@@ -86,15 +213,15 @@ func processTreeNodes(writer io.Writer, nodes []parse.Node, templateName string,
 
 		case *parse.IfNode:
 			// If node
-			generateIfCode(writer, n, templateName, offset, varCounter)
+			generateIfCode(writer, n, templatePath, offset, varCounter)
 
 		case *parse.RangeNode:
 			// Range node
-			generateRangeCode(writer, n, templateName, offset, varCounter)
+			generateRangeCode(writer, n, templatePath, offset, varCounter)
 
 		case *parse.WithNode:
 			// With node
-			generateWithCode(writer, n, templateName, offset, varCounter)
+			generateWithCode(writer, n, templatePath, offset, varCounter)
 
 		case *parse.TemplateNode:
 			// Template inclusion
@@ -247,7 +374,7 @@ func generateActionCode(writer io.Writer, action *parse.ActionNode, varCounter *
 }
 
 // generateIfCode handles if/else statements
-func generateIfCode(writer io.Writer, ifNode *parse.IfNode, templateName string, offset *LineIndex, varCounter *int) {
+func generateIfCode(writer io.Writer, ifNode *parse.IfNode, templatePath string, offset *LineIndex, varCounter *int) {
 	condVar := fmt.Sprintf("cond%d", *varCounter)
 	(*varCounter)++
 
@@ -309,7 +436,7 @@ func generateIfCode(writer io.Writer, ifNode *parse.IfNode, templateName string,
 	if ifNode.List != nil {
 		// Process all nodes in the if body recursively
 		for _, node := range ifNode.List.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 1)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 1)
 		}
 	}
 
@@ -319,7 +446,7 @@ func generateIfCode(writer io.Writer, ifNode *parse.IfNode, templateName string,
 
 		// Process all nodes in the else body recursively
 		for _, node := range ifNode.ElseList.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 1)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 1)
 		}
 	}
 
@@ -327,8 +454,10 @@ func generateIfCode(writer io.Writer, ifNode *parse.IfNode, templateName string,
 }
 
 // processNodeWithIndent processes a single node with additional indentation
-func processNodeWithIndent(writer io.Writer, node parse.Node, templateName string, offset *LineIndex, varCounter *int, indentLevel int) {
+func processNodeWithIndent(writer io.Writer, node parse.Node, templatePath string, offset *LineIndex, varCounter *int, indentLevel int) {
 	indent := strings.Repeat("\t", indentLevel+2) // Base indent (2) + additional levels
+
+	emitLineDirective(writer, templatePath, offset, int64(node.Position()))
 
 	switch n := node.(type) {
 	case *parse.TextNode:
@@ -346,21 +475,21 @@ func processNodeWithIndent(writer io.Writer, node parse.Node, templateName strin
 	case *parse.IfNode:
 		// Nested if node
 		origOutput := strings.Builder{}
-		generateIfCode(&origOutput, n, templateName, offset, varCounter)
+		generateIfCode(&origOutput, n, templatePath, offset, varCounter)
 		indented := strings.ReplaceAll(origOutput.String(), "\t\t", indent)
 		writeString(writer, indented)
 
 	case *parse.RangeNode:
 		// Nested range node
 		origOutput := strings.Builder{}
-		generateRangeCode(&origOutput, n, templateName, offset, varCounter)
+		generateRangeCode(&origOutput, n, templatePath, offset, varCounter)
 		indented := strings.ReplaceAll(origOutput.String(), "\t\t", indent)
 		writeString(writer, indented)
 
 	case *parse.WithNode:
 		// Nested with node
 		origOutput := strings.Builder{}
-		generateWithCode(&origOutput, n, templateName, offset, varCounter)
+		generateWithCode(&origOutput, n, templatePath, offset, varCounter)
 		indented := strings.ReplaceAll(origOutput.String(), "\t\t", indent)
 		writeString(writer, indented)
 
@@ -383,7 +512,7 @@ func processNodeWithIndent(writer io.Writer, node parse.Node, templateName strin
 }
 
 // generateRangeCode handles range loops
-func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templateName string, offset *LineIndex, varCounter *int) {
+func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templatePath string, offset *LineIndex, varCounter *int) {
 	rangeVar := fmt.Sprintf("rangeData%d", *varCounter)
 	(*varCounter)++
 
@@ -480,7 +609,7 @@ func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templateNam
 	writeString(writer, "\t\t\t\t// Range body\n")
 	if rangeNode.List != nil && rangeNode.List.Nodes != nil {
 		for _, node := range rangeNode.List.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 2)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 2)
 		}
 	}
 
@@ -517,7 +646,7 @@ func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templateNam
 	writeString(writer, "\t\t\t\t// Range body\n")
 	if rangeNode.List != nil && rangeNode.List.Nodes != nil {
 		for _, node := range rangeNode.List.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 2)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 2)
 		}
 	}
 
@@ -531,7 +660,7 @@ func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templateNam
 		writeString(writer, "\t\tif !hasItems {\n")
 
 		for _, node := range rangeNode.ElseList.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 1)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 1)
 		}
 
 		writeString(writer, "\t\t}\n")
@@ -539,7 +668,7 @@ func generateRangeCode(writer io.Writer, rangeNode *parse.RangeNode, templateNam
 }
 
 // generateWithCode handles with blocks
-func generateWithCode(writer io.Writer, withNode *parse.WithNode, templateName string, offset *LineIndex, varCounter *int) {
+func generateWithCode(writer io.Writer, withNode *parse.WithNode, templatePath string, offset *LineIndex, varCounter *int) {
 	withVar := fmt.Sprintf("withData%d", *varCounter)
 	(*varCounter)++
 
@@ -596,7 +725,7 @@ func generateWithCode(writer io.Writer, withNode *parse.WithNode, templateName s
 	// Process the with body with proper node handling
 	if withNode.List != nil {
 		for _, node := range withNode.List.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 1)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 1)
 		}
 	}
 
@@ -608,7 +737,7 @@ func generateWithCode(writer io.Writer, withNode *parse.WithNode, templateName s
 		writeString(writer, "\t\t} else {\n")
 
 		for _, node := range withNode.ElseList.Nodes {
-			processNodeWithIndent(writer, node, templateName, offset, varCounter, 1)
+			processNodeWithIndent(writer, node, templatePath, offset, varCounter, 1)
 		}
 	}
 
