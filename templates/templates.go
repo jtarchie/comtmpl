@@ -116,6 +116,16 @@ func EvalField(data any, parts []string) (any, error) {
 	return current, nil
 }
 
+// MustEvalField evaluates a field path and panics on error
+// Used for template generation where we need to embed field access in arguments
+func MustEvalField(data any, parts []string) any {
+	value, err := EvalField(data, parts)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
 // Call a named function from the FuncMap with provided arguments
 func (t *Templates) CallFunc(funcName string, args ...any) (any, error) {
 	fn, ok := t.funcs[funcName]
@@ -129,6 +139,14 @@ func (t *Templates) CallFunc(funcName string, args ...any) (any, error) {
 	}
 
 	return value, nil
+}
+
+// GetFunc retrieves a function from the FuncMap by name
+func (t *Templates) GetFunc(name string) any {
+	if fn, ok := t.funcs[name]; ok {
+		return fn
+	}
+	return nil
 }
 
 // Helper function to call a function using reflection
@@ -228,4 +246,235 @@ func callFunction(fn any, args ...any) (any, error) {
 			return nil, nil
 		}
 	}
+}
+
+// IsTrue evaluates whether a value is truthy according to Go template rules
+func IsTrue(val any) (bool, error) {
+	if val == nil {
+		return false, nil
+	}
+
+	b, ok := val.(bool)
+	if ok {
+		return b, nil
+	}
+
+	// Handle other types using reflection
+	v := reflect.ValueOf(val)
+	switch v.Kind() {
+	case reflect.Array, reflect.Chan, reflect.Map, reflect.Slice, reflect.String:
+		return v.Len() > 0, nil
+	case reflect.Bool:
+		return v.Bool(), nil
+	case reflect.Complex64, reflect.Complex128:
+		return v.Complex() != 0, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return v.Int() != 0, nil
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		return v.Uint() != 0, nil
+	case reflect.Float32, reflect.Float64:
+		return v.Float() != 0, nil
+	case reflect.Struct:
+		return true, nil // Non-nil structs are always true
+	case reflect.Pointer, reflect.Interface:
+		return !v.IsNil(), nil
+	default:
+		return false, fmt.Errorf("cannot determine truth value of type %s", v.Type())
+	}
+}
+
+// GetIterable converts a value into an iterable map or slice for range loops
+func GetIterable(val any) (any, error) {
+	if val == nil {
+		return make(map[string]any), nil // Empty map for nil
+	}
+
+	// Handle common types directly
+	switch v := val.(type) {
+	case map[string]any:
+		return v, nil
+	case []any:
+		return v, nil
+	case string:
+		// Convert string to a slice of runes
+		runes := []rune(v)
+		result := make([]any, len(runes))
+		for i, r := range runes {
+			result[i] = string(r)
+		}
+		return result, nil
+	}
+
+	// Use reflection for other types
+	v := reflect.ValueOf(val)
+
+	// Dereference pointers
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return make(map[string]any), nil
+		}
+		v = v.Elem()
+	}
+
+	switch v.Kind() {
+	case reflect.Map:
+		// Convert to a map[string]any
+		result := make(map[string]any)
+		for _, key := range v.MapKeys() {
+			if s, ok := key.Interface().(string); ok {
+				value := v.MapIndex(key)
+				if value.CanInterface() {
+					result[s] = value.Interface()
+				} else {
+					result[s] = nil
+				}
+			} else {
+				// Try to convert key to string
+				result[fmt.Sprintf("%v", key.Interface())] = v.MapIndex(key).Interface()
+			}
+		}
+		return result, nil
+
+	case reflect.Slice, reflect.Array:
+		// Convert to a []any
+		length := v.Len()
+		result := make([]any, length)
+		for i := 0; i < length; i++ {
+			item := v.Index(i)
+			if item.CanInterface() {
+				result[i] = item.Interface()
+			} else {
+				result[i] = nil
+			}
+		}
+		return result, nil
+
+	case reflect.Struct:
+		// Convert struct to a map of field names to values
+		result := make(map[string]any)
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			field := v.Field(i)
+			if field.CanInterface() {
+				result[t.Field(i).Name] = field.Interface()
+			}
+		}
+		return result, nil
+
+	case reflect.String:
+		// Split the string into runes
+		str := v.String()
+		runes := []rune(str)
+		result := make([]any, len(runes))
+		for i, r := range runes {
+			result[i] = string(r)
+		}
+		return result, nil
+
+	default:
+		// Non-iterable type, return a singular item in a slice
+		if v.CanInterface() {
+			return []any{v.Interface()}, nil
+		}
+		return []any{}, fmt.Errorf("value of type %s cannot be iterated", v.Type())
+	}
+}
+
+// ConvertToAnySlice converts any iterable type to []any
+func ConvertToAnySlice(val any) ([]any, error) {
+	// Already a slice of any
+	if slice, ok := val.([]any); ok {
+		return slice, nil
+	}
+
+	v := reflect.ValueOf(val)
+
+	// Dereference pointers
+	for v.Kind() == reflect.Ptr || v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return []any{}, nil
+		}
+		v = v.Elem()
+	}
+
+	switch v.Kind() {
+	case reflect.Slice, reflect.Array:
+		// Convert to a []any
+		length := v.Len()
+		result := make([]any, length)
+		for i := 0; i < length; i++ {
+			item := v.Index(i)
+			if item.CanInterface() {
+				result[i] = item.Interface()
+			} else {
+				result[i] = nil
+			}
+		}
+		return result, nil
+
+	case reflect.Map:
+		// For maps, return a slice of key-value pairs
+		keys := v.MapKeys()
+		result := make([]any, len(keys))
+		for i, key := range keys {
+			pair := map[string]any{
+				"key":   key.Interface(),
+				"value": v.MapIndex(key).Interface(),
+			}
+			result[i] = pair
+		}
+		return result, nil
+
+	case reflect.String:
+		// Convert string to slice of runes as strings
+		str := v.String()
+		runes := []rune(str)
+		result := make([]any, len(runes))
+		for i, r := range runes {
+			result[i] = string(r)
+		}
+		return result, nil
+
+	default:
+		// For non-iterable types, wrap in a single-item slice
+		if v.CanInterface() {
+			return []any{v.Interface()}, nil
+		}
+		return []any{}, fmt.Errorf("value of type %s cannot be converted to slice", v.Type())
+	}
+}
+
+// Dot returns the current dot value. Inside a range scope, the iteration value
+// is stored at key "."; outside a range scope, dot is the data itself.
+func Dot(data any) any {
+	if m, ok := data.(map[string]any); ok {
+		if v, exists := m["."]; exists {
+			return v
+		}
+	}
+	return data
+}
+
+// NewRangeScope creates a new data context for use in a range loop
+// It combines the outer context with index and value variables
+func NewRangeScope(outerData any, index any, value any) any {
+	// Create a map to represent the range scope
+	scope := make(map[string]any)
+
+	// Add the special range variables
+	scope["."] = value     // Current value becomes the dot
+	scope["$"] = outerData // Original data becomes $
+	scope["index"] = index // Index is available as index
+	scope["value"] = value // Value is available as value
+
+	// If outer data is a map, incorporate its values
+	if outerMap, ok := outerData.(map[string]any); ok {
+		for k, v := range outerMap {
+			if k != "." && k != "$" && k != "index" && k != "value" {
+				scope[k] = v
+			}
+		}
+	}
+
+	return scope
 }

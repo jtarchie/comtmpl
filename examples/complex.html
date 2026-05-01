@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>{{.Title}} - Complex Template Example</title>
+  <style>
+    .highlight { color: blue; }
+    .error { color: red; }
+  </style>
+</head>
+<body>
+  <h1>{{.Title}}</h1>
+  
+  {{/* This is a template comment that should be ignored */}}
+  
+  <!-- Conditional logic -->
+  <div class="user-info">
+    {{if .User}}
+      <p>Welcome, <span class="highlight">{{.User.Name}}</span>!</p>
+      
+      {{if .User.Admin}}
+        <p class="highlight">You have admin privileges</p>
+      {{else}}
+        <p>You are a regular user</p>
+      {{end}}
+      
+      {{with .User.Contact}}
+        <div class="contact">
+          <h3>Contact Information:</h3>
+          <p>Email: {{.Email}}</p>
+          <p>Phone: {{.Phone}}</p>
+        </div>
+      {{else}}
+        <p class="error">No contact information available</p>
+      {{end}}
+    {{else}}
+      <p class="error">No user information available</p>
+    {{end}}
+  </div>
+  
+  <!-- Range loop for items -->
+  <div class="items">
+    <h2>Your Items:</h2>
+    {{range $index, $item := .Items}}
+      <div class="item">
+        <h3>{{$index}}. {{$item.Name}}</h3>
+        <p>Price: ${{$item.Price}}</p>
+        
+        {{if $item.OnSale}}
+          <p class="highlight">ON SALE!</p>
+        {{end}}
+        
+        <!-- Nested range for item tags -->
+        {{if $item.Tags}}
+          <p>Tags:</p>
+          <ul>
+            {{range $item.Tags}}
+              <li>{{.}}</li>
+            {{end}}
+          </ul>
+        {{else}}
+          <p>No tags available</p>
+        {{end}}
+      </div>
+    {{else}}
+      <p class="error">No items in your cart</p>
+    {{end}}
+  </div>
+  
+  <!-- Function calls and pipes -->
+  <div class="footer">
+    <p>Copyright &copy; {{.Year}} {{.Company | upper}}</p>
+    <p>{{.Description}}</p>
+  </div>
+</body>
+</html>
